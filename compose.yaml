@@ -1,0 +1,128 @@
+services:
+  # <Infra>
+  proxy:
+    image: traefik
+    command: --api.insecure=true --providers.docker --ping
+    ports:
+      - "80:80"
+      - "8080:8080"
+    healthcheck:
+      test: "curl --fail localhost:8080/ping || exit 1"
+      interval: 30s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      - "traefik.http.routers.proxy.rule=Host(`proxy.truthmasking.online`)"
+
+  pihole:
+    image: pihole/pihole:latest
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+    env_file: "./.env"
+    volumes:
+      - "./vol/pihole/etc-pihole:/etc/pihole"
+      - "./vol/pihole/etc-dnsmasq.d:/etc/dnsmasq.d"
+    restart: unless-stopped
+    labels:
+      - "traefik.http.routers.pihole.rule=Host(`pihole.truthmasking.online`)"
+    depends_on:
+      - proxy
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    privileged: true
+    volumes:
+      - "./vol/portainer/data:/data"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    restart: unless-stopped
+    ports:
+      - "9443:9443"
+    depends_on:
+      - proxy
+    labels:
+      - "traefik.http.routers.portainer.rule=Host(`portainer.truthmasking.online`)"
+
+  vpn:
+    image: qmcgaw/gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - 8888:8888/tcp # HTTP proxy
+      - 8388:8388/tcp # Shadowsocks
+      - 8388:8388/udp # Shadowsocks
+      # aria2 ports
+      - "6800:6800/tcp"
+      - "6800:6800/udp"
+      - "6888:6888/tcp"
+      - "6888:6888/udp"
+    volumes:
+      - ./vol/vpn/data:/gluetun
+    env_file: "./.env"
+
+  # </Infra>
+
+  # <Media>
+  downloader-rpc:
+    image: p3terx/aria2-pro
+    environment:
+      - PUID=65534
+      - PGID=65534
+      - UMASK_SET=022
+      - DISK_CACHE=64M
+      - IPV6_MODE=false
+      - UPDATE_TRACKERS=false
+      - CUSTOM_TRACKER_URL=
+    env_file: "./.env"
+    restart: unless-stopped
+    network_mode: "service:vpn"
+    volumes:
+      - ./vol/aria2/config:/config
+      # Map downloads folders
+      # ${HOME}/downloads:/downloads
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+    depends_on:
+      - proxy
+
+  downloader-ui:
+    image: p3terx/ariang
+    command: --port 6880 --ipv6
+    ports:
+      - "6880:6880"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+    depends_on:
+      - proxy
+    labels:
+      - "traefik.http.routers.downloader-ui.rule=Host(`downloader.truthmasking.online`)"
+
+  media:
+    image: jellyfin/jellyfin
+    volumes:
+      - ./vol/jellyfin/config:/config
+      - ./vol/jellyfin/cache:/cache
+      # map more dirs from the host to the container
+      # - ${HOME}/movies:/movies
+      # - ${HOME}/series:/series
+    restart: unless-stopped
+    env_file: "./.env"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8096:8096"
+    depends_on:
+      - proxy
+    labels:
+      - "traefik.http.routers.media.rule=Host(`media.truthmasking.online`)"
+
+  # </Media>
